@@ -1,0 +1,1295 @@
+info:
+  _postman_id: amfam-service-template-2026
+  name: AMFAM — Insurance Platform Service Template
+  description: |-
+    # AMFAM Insurance Platform — Sample Service Template
+
+    A representative API service template modeled on American Family Insurance's discovered infrastructure:
+
+    | Signal | Reflected In Template |
+    |--------|----------------------|
+    | AWS (primary cloud) | Base URLs, health checks, CloudFront headers |
+    | Okta (IAM) | OAuth 2.0 Client Credentials + Bearer token auth |
+    | Kubernetes | Readiness/liveness probes, service mesh headers |
+    | Dynatrace | `x-dynatrace` trace correlation headers |
+    | Microservices (Homesite pattern) | Domain-driven service boundaries |
+    | Multi-subsidiary | Environment variables per operating company |
+    | Legacy on-prem coexistence | SFTP/batch endpoints alongside REST |
+
+    ## How to Use This Template
+
+    1. **Import** into a Postman workspace
+    2. **Set the environment** to one of the operating company configs
+    3. **Walk through the folders** during the engagement to spark conversation about governance, auth standardization, and API catalog needs
+
+    ---
+
+    *Generated from AMFAM Discovery Brief — March 2026*
+  schema: https://schema.getpostman.com/json/collection/v2.1.0/collection.json
+
+# ---------------------------------------------------------------------------
+# Environments — switch between subsidiaries during the engagement
+# ---------------------------------------------------------------------------
+environments:
+
+  amfam_core:
+    name: "AMFAM — Core (American Family Mutual)"
+    description: >-
+      Parent company. On-prem API (api.amfam.com, firewalled).
+      Sitecore XM Cloud CMS on Azure. Website on Vercel.
+    values:
+      subsidiary_domain: amfam.com
+      operating_company: american_family_mutual
+      base_url: https://api.amfam.com
+      api_version: v1
+      okta_domain: amfam.okta.com
+      okta_scope: "api:read api:write"
+      dynatrace_tag: "NA;amfam-core;policy-service"
+      sitecore_api_key: "<SITECORE_EDGE_API_KEY>"
+    secrets:
+      client_id: "<YOUR_OKTA_CLIENT_ID>"
+      client_secret: "<YOUR_OKTA_CLIENT_SECRET>"
+    runtime:
+      access_token: ""
+      token_expiry: ""
+
+  homesite:
+    name: "AMFAM — Homesite (AWS Microservices)"
+    description: >-
+      Subsidiary that migrated monolith → microservices on AWS.
+      515% reduction in quote-to-bind time. DNS on Route53.
+      Legacy IIS/ASP.NET still present at www.homesite.com.
+    values:
+      subsidiary_domain: homesite.com
+      operating_company: homesite
+      base_url: https://api.homesite.com
+      api_version: v1
+      okta_domain: amfam.okta.com
+      okta_scope: "api:read api:write quotes:create"
+      dynatrace_tag: "NA;homesite;policy-service"
+      sitecore_api_key: ""
+    secrets:
+      client_id: "<YOUR_OKTA_CLIENT_ID>"
+      client_secret: "<YOUR_OKTA_CLIENT_SECRET>"
+    runtime:
+      access_token: ""
+      token_expiry: ""
+
+  connect:
+    name: "AMFAM — CONNECT (Brokerage Platform)"
+    description: >-
+      Brokerage platform at connectbyamfam.com. On-prem root
+      (165.200.238.68) redirects to Vercel. policyservice subdomain
+      routes through AWS but currently returning 500s.
+    values:
+      subsidiary_domain: connectbyamfam.com
+      operating_company: connect_by_amfam
+      base_url: https://api.connectbyamfam.com
+      api_version: v1
+      okta_domain: amfam.okta.com
+      okta_scope: "api:read policyservice:read"
+      dynatrace_tag: "NA;connect;policy-service"
+      sitecore_api_key: ""
+    secrets:
+      client_id: "<YOUR_OKTA_CLIENT_ID>"
+      client_secret: "<YOUR_OKTA_CLIENT_SECRET>"
+    runtime:
+      access_token: ""
+      token_expiry: ""
+
+# ---------------------------------------------------------------------------
+# Collection
+# ---------------------------------------------------------------------------
+auth:
+  type: bearer
+  bearer:
+  - key: token
+    value: '{{access_token}}'
+    type: string
+event:
+- listen: prerequest
+  script:
+    type: text/javascript
+    exec:
+    - // Auto-fetch Okta token if expired or missing
+    - const tokenExpiry = pm.environment.get('token_expiry');
+    - const now = Math.floor(Date.now() / 1000);
+    - ''
+    - if (!pm.environment.get('access_token') || (tokenExpiry && now >= parseInt(tokenExpiry))) {
+    - '    const oktaDomain = pm.environment.get(''okta_domain'');'
+    - '    const clientId = pm.environment.get(''client_id'');'
+    - '    const clientSecret = pm.environment.get(''client_secret'');'
+    - '    const scope = pm.environment.get(''okta_scope'') || ''api:read api:write'';'
+    - ''
+    - '    pm.sendRequest({'
+    - '        url: `https://${oktaDomain}/oauth2/default/v1/token`,'
+    - '        method: ''POST'','
+    - '        header: {'
+    - '            ''Content-Type'': ''application/x-www-form-urlencoded'','
+    - '            ''Accept'': ''application/json'''
+    - '        },'
+    - '        body: {'
+    - '            mode: ''urlencoded'','
+    - '            urlencoded: ['
+    - '                { key: ''grant_type'', value: ''client_credentials'' },'
+    - '                { key: ''client_id'', value: clientId },'
+    - '                { key: ''client_secret'', value: clientSecret },'
+    - '                { key: ''scope'', value: scope }'
+    - '            ]'
+    - '        }'
+    - '    }, (err, res) => {'
+    - '        if (!err && res.code === 200) {'
+    - '            const body = res.json();'
+    - '            pm.environment.set(''access_token'', body.access_token);'
+    - '            pm.environment.set(''token_expiry'', String(now + body.expires_in - 30));'
+    - '            console.log(''Okta token refreshed successfully'');'
+    - '        } else {'
+    - '            console.error(''Token fetch failed:'', err || res.text());'
+    - '        }'
+    - '    });'
+    - '}'
+- listen: test
+  script:
+    type: text/javascript
+    exec:
+    - '// Governance: validate standard response headers on every call'
+    - pm.test('Response includes correlation ID', function () {
+    - '    pm.expect(pm.response.headers.has(''x-correlation-id'') || pm.response.headers.has(''x-request-id'')).to.be.true;'
+    - '});'
+    - ''
+    - pm.test('Response includes API version header', function () {
+    - '    pm.expect(pm.response.headers.has(''x-api-version'')).to.be.true;'
+    - '});'
+    - ''
+    - pm.test('Strict-Transport-Security is present', function () {
+    - '    pm.expect(pm.response.headers.has(''strict-transport-security'')).to.be.true;'
+    - '});'
+    - ''
+    - pm.test('Response time is within SLA (< 2000ms)', function () {
+    - '    pm.expect(pm.response.responseTime).to.be.below(2000);'
+    - '});'
+variable:
+- key: base_url
+  value: https://api.{{subsidiary_domain}}
+- key: api_version
+  value: v1
+item:
+- name: 0 — Platform Health
+  description: Kubernetes-style health probes. AMFAM runs K8s on AWS EKS. These endpoints are the baseline contract every
+    service must implement.
+  item:
+  - name: Liveness Probe
+    request:
+      method: GET
+      header: []
+      url:
+        raw: '{{base_url}}/health/live'
+        host:
+        - '{{base_url}}'
+        path:
+        - health
+        - live
+      description: Kubernetes liveness check. Returns 200 if the process is running. No auth required — exposed to the K8s
+        kubelet only.
+    response:
+    - name: Healthy
+      status: OK
+      code: 200
+      header:
+      - key: Content-Type
+        value: application/json
+      - key: X-Api-Version
+        value: 1.4.2
+      - key: X-Request-Id
+        value: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+      body: |-
+        {
+          "status": "UP",
+          "timestamp": "2026-03-24T04:30:00Z"
+        }
+  - name: Readiness Probe
+    request:
+      method: GET
+      header: []
+      url:
+        raw: '{{base_url}}/health/ready'
+        host:
+        - '{{base_url}}'
+        path:
+        - health
+        - ready
+      description: Kubernetes readiness check. Returns 200 only when all dependencies (Okta, CouchDB, downstream services)
+        are reachable.
+    response:
+    - name: Ready
+      status: OK
+      code: 200
+      header:
+      - key: Content-Type
+        value: application/json
+      - key: X-Api-Version
+        value: 1.4.2
+      body: |-
+        {
+          "status": "UP",
+          "checks": {
+            "okta": { "status": "UP", "latency_ms": 12 },
+            "couchdb": { "status": "UP", "latency_ms": 3 },
+            "policy-service": { "status": "UP", "latency_ms": 45 },
+            "sftp-bridge": { "status": "UP", "latency_ms": 120 }
+          },
+          "timestamp": "2026-03-24T04:30:00Z"
+        }
+    - name: Degraded — Legacy Bridge Down
+      status: Service Unavailable
+      code: 503
+      header:
+      - key: Content-Type
+        value: application/json
+      body: |-
+        {
+          "status": "DEGRADED",
+          "checks": {
+            "okta": { "status": "UP", "latency_ms": 14 },
+            "couchdb": { "status": "UP", "latency_ms": 4 },
+            "policy-service": { "status": "UP", "latency_ms": 52 },
+            "sftp-bridge": { "status": "DOWN", "error": "Connection refused to 165.200.238.15:22" }
+          },
+          "timestamp": "2026-03-24T04:30:00Z"
+        }
+  - name: Dynatrace Synthetic Check
+    request:
+      method: GET
+      header:
+      - key: x-dynatrace
+        value: FW4;{{dynatrace_tag}}
+        description: Dynatrace distributed trace tag for synthetic monitoring
+      url:
+        raw: '{{base_url}}/health/deep'
+        host:
+        - '{{base_url}}'
+        path:
+        - health
+        - deep
+      description: Deep health check with Dynatrace trace correlation. Validates full request path through API gateway → service
+        → database → legacy bridge.
+    response:
+    - name: Deep Health OK
+      status: OK
+      code: 200
+      header:
+      - key: Content-Type
+        value: application/json
+      - key: x-dynatrace
+        value: FW4;2a4b6c8d;path=api.amfam.com
+      - key: server-timing
+        value: dtRpid;desc="-1234567890", dtSInfo;desc="0"
+      body: |-
+        {
+          "status": "UP",
+          "trace_id": "abc123def456",
+          "path": [
+            { "hop": "cloudfront", "latency_ms": 2 },
+            { "hop": "nginx-ingress", "latency_ms": 1 },
+            { "hop": "policy-service", "latency_ms": 34 },
+            { "hop": "couchdb", "latency_ms": 5 },
+            { "hop": "sftp-bridge", "latency_ms": 145 }
+          ],
+          "total_latency_ms": 187,
+          "timestamp": "2026-03-24T04:30:00Z"
+        }
+- name: 1 — Auth (Okta OAuth 2.0)
+  description: AMFAM uses Okta for workforce and service identity. This folder demonstrates the Client Credentials grant for
+    service-to-service auth — the pattern their microservices would use internally.
+  item:
+  - name: Get Access Token (Client Credentials)
+    event:
+    - listen: test
+      script:
+        type: text/javascript
+        exec:
+        - if (pm.response.code === 200) {
+        - '    const body = pm.response.json();'
+        - '    pm.environment.set(''access_token'', body.access_token);'
+        - '    const expiry = Math.floor(Date.now() / 1000) + body.expires_in - 30;'
+        - '    pm.environment.set(''token_expiry'', String(expiry));'
+        - ''
+        - '    pm.test(''Token type is Bearer'', function () {'
+        - '        pm.expect(body.token_type).to.eql(''Bearer'');'
+        - '    });'
+        - ''
+        - '    pm.test(''Token has expected scopes'', function () {'
+        - '        pm.expect(body.scope).to.include(''api:read'');'
+        - '    });'
+        - ''
+        - '    // Decode JWT to inspect claims without external tools'
+        - '    const payload = JSON.parse(atob(body.access_token.split(''.'')[1]));'
+        - '    console.log(''Token issuer:'', payload.iss);'
+        - '    console.log(''Token audience:'', payload.aud);'
+        - '    console.log(''Token scopes:'', payload.scp);'
+        - ''
+        - '    pm.test(''Issuer matches Okta domain'', function () {'
+        - '        pm.expect(payload.iss).to.include(pm.environment.get(''okta_domain''));'
+        - '    });'
+        - '}'
+    request:
+      auth:
+        type: noauth
+      method: POST
+      header:
+      - key: Content-Type
+        value: application/x-www-form-urlencoded
+      - key: Accept
+        value: application/json
+      body:
+        mode: urlencoded
+        urlencoded:
+        - key: grant_type
+          value: client_credentials
+        - key: client_id
+          value: '{{client_id}}'
+        - key: client_secret
+          value: '{{client_secret}}'
+        - key: scope
+          value: '{{okta_scope}}'
+      url:
+        raw: https://{{okta_domain}}/oauth2/default/v1/token
+        protocol: https
+        host:
+        - '{{okta_domain}}'
+        path:
+        - oauth2
+        - default
+        - v1
+        - token
+      description: |-
+        Fetches an OAuth 2.0 access token via Okta's Client Credentials grant.
+
+        This is the service-to-service pattern. The pre-request script at the collection level auto-refreshes this token, so individual requests don't need to call this manually.
+    response:
+    - name: Token Issued
+      status: OK
+      code: 200
+      header:
+      - key: Content-Type
+        value: application/json
+      body: |-
+        {
+          "token_type": "Bearer",
+          "expires_in": 3600,
+          "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodHRwczovL2FtZmFtLm9rdGEuY29tL29hdXRoMi9kZWZhdWx0Iiwic3ViIjoiMGNsaWVudC1wb2xpY3ktc2VydmljZSIsImF1ZCI6ImFwaS5hbWZhbS5jb20iLCJzY3AiOlsiYXBpOnJlYWQiLCJhcGk6d3JpdGUiXSwiZXhwIjoxNzc0MzMwMDAwLCJpYXQiOjE3NzQzMjY0MDB9.placeholder-signature",
+          "scope": "api:read api:write"
+        }
+  - name: Introspect Token
+    request:
+      auth:
+        type: noauth
+      method: POST
+      header:
+      - key: Content-Type
+        value: application/x-www-form-urlencoded
+      - key: Accept
+        value: application/json
+      body:
+        mode: urlencoded
+        urlencoded:
+        - key: token
+          value: '{{access_token}}'
+        - key: token_type_hint
+          value: access_token
+        - key: client_id
+          value: '{{client_id}}'
+        - key: client_secret
+          value: '{{client_secret}}'
+      url:
+        raw: https://{{okta_domain}}/oauth2/default/v1/introspect
+        protocol: https
+        host:
+        - '{{okta_domain}}'
+        path:
+        - oauth2
+        - default
+        - v1
+        - introspect
+      description: Validates a token's active status and claims. Useful for demonstrating token lifecycle governance.
+    response: []
+- name: 2 — Policy Service
+  description: Core insurance domain. Policies are the heart of AMFAM's business across all 14 operating companies. This models
+    a RESTful policy API that would sit behind their AWS infrastructure.
+  item:
+  - name: List Policies
+    event:
+    - listen: test
+      script:
+        type: text/javascript
+        exec:
+        - pm.test('Status is 200', function () {
+        - '    pm.response.to.have.status(200);'
+        - '});'
+        - ''
+        - pm.test('Response is paginated', function () {
+        - '    const body = pm.response.json();'
+        - '    pm.expect(body).to.have.property(''data'');'
+        - '    pm.expect(body).to.have.property(''pagination'');'
+        - '    pm.expect(body.pagination).to.have.property(''total'');'
+        - '    pm.expect(body.pagination).to.have.property(''page'');'
+        - '    pm.expect(body.pagination).to.have.property(''per_page'');'
+        - '});'
+        - ''
+        - pm.test('All policies have required fields', function () {
+        - '    const policies = pm.response.json().data;'
+        - '    policies.forEach(p => {'
+        - '        pm.expect(p).to.have.all.keys(''policy_id'', ''type'', ''status'', ''effective_date'', ''operating_company'');'
+        - '    });'
+        - '});'
+    request:
+      method: GET
+      header:
+      - key: Accept
+        value: application/json
+      - key: X-Correlation-Id
+        value: '{{$guid}}'
+      - key: X-Operating-Company
+        value: '{{operating_company}}'
+        description: Routes to correct subsidiary backend
+      url:
+        raw: '{{base_url}}/{{api_version}}/policies?page=1&per_page=25&status=active'
+        host:
+        - '{{base_url}}'
+        path:
+        - '{{api_version}}'
+        - policies
+        query:
+        - key: page
+          value: '1'
+        - key: per_page
+          value: '25'
+        - key: status
+          value: active
+    response:
+    - name: Paginated Policy List
+      status: OK
+      code: 200
+      header:
+      - key: Content-Type
+        value: application/json
+      - key: X-Api-Version
+        value: 1.4.2
+      - key: X-Correlation-Id
+        value: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+      - key: X-RateLimit-Limit
+        value: '1000'
+      - key: X-RateLimit-Remaining
+        value: '998'
+      - key: X-RateLimit-Reset
+        value: '1774330000'
+      body: |-
+        {
+          "data": [
+            {
+              "policy_id": "POL-2026-001234",
+              "type": "homeowners",
+              "status": "active",
+              "effective_date": "2026-01-15",
+              "expiration_date": "2027-01-15",
+              "operating_company": "american_family_mutual",
+              "premium": { "annual": 1450.00, "currency": "USD" },
+              "insured": {
+                "name": "Jane Doe",
+                "state": "WI"
+              },
+              "_links": {
+                "self": "/v1/policies/POL-2026-001234",
+                "claims": "/v1/policies/POL-2026-001234/claims",
+                "documents": "/v1/policies/POL-2026-001234/documents"
+              }
+            },
+            {
+              "policy_id": "POL-2026-005678",
+              "type": "auto",
+              "status": "active",
+              "effective_date": "2026-03-01",
+              "expiration_date": "2026-09-01",
+              "operating_company": "homesite",
+              "premium": { "annual": 920.00, "currency": "USD" },
+              "insured": {
+                "name": "John Smith",
+                "state": "OH"
+              },
+              "_links": {
+                "self": "/v1/policies/POL-2026-005678",
+                "claims": "/v1/policies/POL-2026-005678/claims",
+                "documents": "/v1/policies/POL-2026-005678/documents"
+              }
+            }
+          ],
+          "pagination": {
+            "total": 248,
+            "page": 1,
+            "per_page": 25,
+            "total_pages": 10
+          }
+        }
+  - name: Get Policy by ID
+    request:
+      method: GET
+      header:
+      - key: Accept
+        value: application/json
+      - key: X-Correlation-Id
+        value: '{{$guid}}'
+      - key: X-Operating-Company
+        value: '{{operating_company}}'
+      url:
+        raw: '{{base_url}}/{{api_version}}/policies/:policy_id'
+        host:
+        - '{{base_url}}'
+        path:
+        - '{{api_version}}'
+        - policies
+        - :policy_id
+        variable:
+        - key: policy_id
+          value: POL-2026-001234
+    response:
+    - name: Policy Detail
+      status: OK
+      code: 200
+      header:
+      - key: Content-Type
+        value: application/json
+      - key: X-Api-Version
+        value: 1.4.2
+      - key: X-Correlation-Id
+        value: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+      - key: ETag
+        value: '"v3-abc123"'
+      - key: Cache-Control
+        value: private, max-age=60
+      body: |-
+        {
+          "policy_id": "POL-2026-001234",
+          "type": "homeowners",
+          "status": "active",
+          "effective_date": "2026-01-15",
+          "expiration_date": "2027-01-15",
+          "operating_company": "american_family_mutual",
+          "premium": {
+            "annual": 1450.00,
+            "monthly": 120.83,
+            "currency": "USD",
+            "payment_method": "auto_debit"
+          },
+          "insured": {
+            "customer_id": "CUST-0098765",
+            "name": "Jane Doe",
+            "address": {
+              "street": "123 Maple Dr",
+              "city": "Madison",
+              "state": "WI",
+              "zip": "53703"
+            }
+          },
+          "coverages": [
+            { "type": "dwelling", "limit": 350000, "deductible": 1000 },
+            { "type": "personal_property", "limit": 175000, "deductible": 1000 },
+            { "type": "liability", "limit": 300000 }
+          ],
+          "agent": {
+            "agent_id": "AGT-4421",
+            "name": "Rick DeKoter",
+            "office": "Edina, MN",
+            "_link": "/v1/agents/AGT-4421"
+          },
+          "_links": {
+            "self": "/v1/policies/POL-2026-001234",
+            "claims": "/v1/policies/POL-2026-001234/claims",
+            "documents": "/v1/policies/POL-2026-001234/documents",
+            "billing": "/v1/policies/POL-2026-001234/billing"
+          },
+          "_meta": {
+            "source_system": "legacy-mainframe",
+            "last_synced": "2026-03-24T03:00:00Z",
+            "sync_method": "sftp-batch-nightly"
+          }
+        }
+  - name: Create Quote
+    request:
+      method: POST
+      header:
+      - key: Content-Type
+        value: application/json
+      - key: Accept
+        value: application/json
+      - key: X-Correlation-Id
+        value: '{{$guid}}'
+      - key: X-Operating-Company
+        value: '{{operating_company}}'
+      - key: X-Idempotency-Key
+        value: '{{$guid}}'
+      body:
+        mode: raw
+        raw: |-
+          {
+            "type": "homeowners",
+            "applicant": {
+              "first_name": "Jane",
+              "last_name": "Doe",
+              "date_of_birth": "1985-06-15",
+              "address": {
+                "street": "123 Maple Dr",
+                "city": "Madison",
+                "state": "WI",
+                "zip": "53703"
+              }
+            },
+            "property": {
+              "year_built": 1998,
+              "square_feet": 2200,
+              "construction_type": "frame",
+              "roof_type": "asphalt_shingle",
+              "heating_type": "forced_air"
+            },
+            "requested_coverages": [
+              { "type": "dwelling", "limit": 350000 },
+              { "type": "personal_property", "limit": 175000 },
+              { "type": "liability", "limit": 300000 }
+            ],
+            "agent_id": "AGT-4421"
+          }
+      url:
+        raw: '{{base_url}}/{{api_version}}/quotes'
+        host:
+        - '{{base_url}}'
+        path:
+        - '{{api_version}}'
+        - quotes
+      description: Creates a new insurance quote. This is the endpoint Homesite optimized during their microservices migration,
+        achieving a 515% reduction in quote-to-bind time.
+    response:
+    - name: Quote Created
+      status: Created
+      code: 201
+      header:
+      - key: Content-Type
+        value: application/json
+      - key: Location
+        value: /v1/quotes/QT-2026-0099
+      - key: X-Api-Version
+        value: 1.4.2
+      - key: X-Correlation-Id
+        value: b2c3d4e5-f6a7-8901-bcde-f12345678901
+      body: |-
+        {
+          "quote_id": "QT-2026-0099",
+          "status": "pending_review",
+          "premium_estimate": {
+            "annual": 1450.00,
+            "monthly": 120.83,
+            "currency": "USD"
+          },
+          "valid_until": "2026-04-23T04:30:00Z",
+          "_links": {
+            "self": "/v1/quotes/QT-2026-0099",
+            "bind": "/v1/quotes/QT-2026-0099/bind",
+            "documents": "/v1/quotes/QT-2026-0099/documents"
+          }
+        }
+- name: 3 — Claims Service
+  description: Claims processing. CSP headers on myaccount.amfam.com reveal integration with glassclaim.com for glass claims.
+    This models the internal claims API.
+  item:
+  - name: File a Claim (FNOL)
+    request:
+      method: POST
+      header:
+      - key: Content-Type
+        value: application/json
+      - key: Accept
+        value: application/json
+      - key: X-Correlation-Id
+        value: '{{$guid}}'
+      - key: X-Operating-Company
+        value: '{{operating_company}}'
+      - key: X-Idempotency-Key
+        value: '{{$guid}}'
+      body:
+        mode: raw
+        raw: |-
+          {
+            "policy_id": "POL-2026-001234",
+            "loss_date": "2026-03-20",
+            "loss_type": "weather_damage",
+            "description": "Hail damage to roof and siding during March 19 storm",
+            "contact": {
+              "phone": "608-555-0123",
+              "email": "jane.doe@example.com",
+              "preferred_contact": "email"
+            },
+            "property_address": {
+              "street": "123 Maple Dr",
+              "city": "Madison",
+              "state": "WI",
+              "zip": "53703"
+            }
+          }
+      url:
+        raw: '{{base_url}}/{{api_version}}/claims'
+        host:
+        - '{{base_url}}'
+        path:
+        - '{{api_version}}'
+        - claims
+      description: First Notice of Loss (FNOL). Creates a new claim and triggers the adjuster assignment workflow.
+    response:
+    - name: Claim Filed
+      status: Created
+      code: 201
+      header:
+      - key: Content-Type
+        value: application/json
+      - key: Location
+        value: /v1/claims/CLM-2026-087654
+      - key: X-Api-Version
+        value: 1.4.2
+      body: |-
+        {
+          "claim_id": "CLM-2026-087654",
+          "status": "open",
+          "assigned_adjuster": null,
+          "created_at": "2026-03-24T04:30:00Z",
+          "_links": {
+            "self": "/v1/claims/CLM-2026-087654",
+            "policy": "/v1/policies/POL-2026-001234",
+            "documents": "/v1/claims/CLM-2026-087654/documents",
+            "status_history": "/v1/claims/CLM-2026-087654/history"
+          }
+        }
+  - name: Get Claim Status
+    request:
+      method: GET
+      header:
+      - key: Accept
+        value: application/json
+      - key: X-Correlation-Id
+        value: '{{$guid}}'
+      url:
+        raw: '{{base_url}}/{{api_version}}/claims/:claim_id'
+        host:
+        - '{{base_url}}'
+        path:
+        - '{{api_version}}'
+        - claims
+        - :claim_id
+        variable:
+        - key: claim_id
+          value: CLM-2026-087654
+    response: []
+  - name: Upload Claim Document
+    request:
+      method: POST
+      header:
+      - key: X-Correlation-Id
+        value: '{{$guid}}'
+      body:
+        mode: formdata
+        formdata:
+        - key: file
+          type: file
+          src: ''
+        - key: document_type
+          value: photo_damage
+          type: text
+        - key: description
+          value: Roof hail damage - north side
+          type: text
+      url:
+        raw: '{{base_url}}/{{api_version}}/claims/:claim_id/documents'
+        host:
+        - '{{base_url}}'
+        path:
+        - '{{api_version}}'
+        - claims
+        - :claim_id
+        - documents
+        variable:
+        - key: claim_id
+          value: CLM-2026-087654
+      description: Uploads supporting documentation for a claim. Stored in S3 behind CloudFront.
+    response: []
+- name: 4 — Agent Service
+  description: Agent lookup and management. AMFAM's sitemap reveals thousands of agent pages at `/agents/{state}/{city}/{name}`.
+    This models the API backing that content.
+  item:
+  - name: Search Agents
+    request:
+      method: GET
+      header:
+      - key: Accept
+        value: application/json
+      - key: X-Correlation-Id
+        value: '{{$guid}}'
+      url:
+        raw: '{{base_url}}/{{api_version}}/agents?state=WI&city=Madison&radius_miles=25'
+        host:
+        - '{{base_url}}'
+        path:
+        - '{{api_version}}'
+        - agents
+        query:
+        - key: state
+          value: WI
+        - key: city
+          value: Madison
+        - key: radius_miles
+          value: '25'
+    response:
+    - name: Agent Search Results
+      status: OK
+      code: 200
+      header:
+      - key: Content-Type
+        value: application/json
+      - key: X-Api-Version
+        value: 1.4.2
+      - key: X-Cache
+        value: HIT from cloudfront
+      body: |-
+        {
+          "data": [
+            {
+              "agent_id": "AGT-4421",
+              "name": "Rick DeKoter",
+              "office": {
+                "city": "Edina",
+                "state": "MN",
+                "phone": "952-555-0100"
+              },
+              "specialties": ["homeowners", "auto", "life"],
+              "operating_company": "american_family_mutual",
+              "profile_url": "https://www.amfam.com/agents/minnesota/edina/rick-dekoter",
+              "_links": {
+                "self": "/v1/agents/AGT-4421",
+                "reviews": "/v1/agents/AGT-4421/reviews"
+              }
+            }
+          ],
+          "pagination": {
+            "total": 47,
+            "page": 1,
+            "per_page": 25
+          }
+        }
+  - name: Get Agent by ID
+    request:
+      method: GET
+      header:
+      - key: Accept
+        value: application/json
+      - key: X-Correlation-Id
+        value: '{{$guid}}'
+      url:
+        raw: '{{base_url}}/{{api_version}}/agents/:agent_id'
+        host:
+        - '{{base_url}}'
+        path:
+        - '{{api_version}}'
+        - agents
+        - :agent_id
+        variable:
+        - key: agent_id
+          value: AGT-4421
+    response: []
+- name: 5 — Content Delivery (Sitecore Edge)
+  description: AMFAM migrated from monolithic Sitecore XP to composable Sitecore XM Cloud, delivered via `edge.sitecorecloud.io`.
+    This models the headless CMS content API that feeds their Next.js frontend on Vercel.
+  item:
+  - name: Get Page Layout (Sitecore Layout Service)
+    request:
+      auth:
+        type: apikey
+        apikey:
+        - key: key
+          value: sc_apikey
+          type: string
+        - key: value
+          value: '{{sitecore_api_key}}'
+          type: string
+        - key: in
+          value: header
+          type: string
+      method: GET
+      header:
+      - key: Accept
+        value: application/json
+      url:
+        raw: https://edge.sitecorecloud.io/api/graphql/v1?sc_site=amfampublic
+        protocol: https
+        host:
+        - edge
+        - sitecorecloud
+        - io
+        path:
+        - api
+        - graphql
+        - v1
+        query:
+        - key: sc_site
+          value: amfampublic
+          description: Matches X-Matched-Path from www.amfam.com headers
+      description: |-
+        Sitecore Experience Edge GraphQL endpoint. The `sc_site=amfampublic` value was discovered in the `X-Matched-Path` response header from www.amfam.com (`/en/_sites/amfampublic`).
+
+        This is how their Next.js frontend on Vercel fetches structured content from the Azure-hosted CMS.
+    response: []
+  - name: Get Site Navigation (GraphQL)
+    request:
+      auth:
+        type: apikey
+        apikey:
+        - key: key
+          value: sc_apikey
+          type: string
+        - key: value
+          value: '{{sitecore_api_key}}'
+          type: string
+        - key: in
+          value: header
+          type: string
+      method: POST
+      header:
+      - key: Content-Type
+        value: application/json
+      - key: Accept
+        value: application/json
+      body:
+        mode: raw
+        raw: |-
+          {
+            "query": "query SiteNavigation($site: String!, $language: String!) { layout(site: $site, routePath: \"/\", language: $language) { item { name, children { results { name, url { path } } } } } }",
+            "variables": {
+              "site": "amfampublic",
+              "language": "en"
+            }
+          }
+      url:
+        raw: https://edge.sitecorecloud.io/api/graphql/v1
+        protocol: https
+        host:
+        - edge
+        - sitecorecloud
+        - io
+        path:
+        - api
+        - graphql
+        - v1
+      description: GraphQL query against Sitecore Edge. Demonstrates that AMFAM has a **GraphQL** surface (via Sitecore) in
+        addition to any REST APIs they maintain internally.
+    response: []
+- name: 6 — Legacy Bridge (SFTP/Batch)
+  description: |-
+    Discovery revealed `sftpmft1a.amfam.com` sharing the same IP as `api.amfam.com` (165.200.238.15). This folder models the API wrapper that likely bridges modern microservices with legacy batch/file transfer systems.
+
+    This is a key conversation starter: replacing file-based integration with API-based patterns.
+  item:
+  - name: Trigger Batch Sync (Policy Extract)
+    request:
+      method: POST
+      header:
+      - key: Content-Type
+        value: application/json
+      - key: Accept
+        value: application/json
+      - key: X-Correlation-Id
+        value: '{{$guid}}'
+      body:
+        mode: raw
+        raw: |-
+          {
+            "job_type": "policy_extract",
+            "operating_company": "{{operating_company}}",
+            "date_range": {
+              "from": "2026-03-23",
+              "to": "2026-03-24"
+            },
+            "format": "json",
+            "destination": "s3://amfam-data-lake-prd/policy-extracts/"
+          }
+      url:
+        raw: '{{base_url}}/{{api_version}}/batch/jobs'
+        host:
+        - '{{base_url}}'
+        path:
+        - '{{api_version}}'
+        - batch
+        - jobs
+      description: |-
+        Triggers a batch extract from the legacy mainframe via the SFTP bridge. This represents the transitional pattern: a REST API that kicks off what was previously a manual SFTP file drop.
+
+        This is the modernization path: SFTP → API-triggered batch → real-time event stream.
+    response:
+    - name: Job Queued
+      status: Accepted
+      code: 202
+      header:
+      - key: Content-Type
+        value: application/json
+      - key: Location
+        value: /v1/batch/jobs/JOB-20260324-001
+      - key: X-Api-Version
+        value: 1.4.2
+      body: |-
+        {
+          "job_id": "JOB-20260324-001",
+          "status": "queued",
+          "estimated_completion": "2026-03-24T05:00:00Z",
+          "_links": {
+            "self": "/v1/batch/jobs/JOB-20260324-001",
+            "cancel": "/v1/batch/jobs/JOB-20260324-001/cancel"
+          }
+        }
+  - name: Get Batch Job Status
+    request:
+      method: GET
+      header:
+      - key: Accept
+        value: application/json
+      - key: X-Correlation-Id
+        value: '{{$guid}}'
+      url:
+        raw: '{{base_url}}/{{api_version}}/batch/jobs/:job_id'
+        host:
+        - '{{base_url}}'
+        path:
+        - '{{api_version}}'
+        - batch
+        - jobs
+        - :job_id
+        variable:
+        - key: job_id
+          value: JOB-20260324-001
+    response:
+    - name: Job Complete
+      status: OK
+      code: 200
+      header:
+      - key: Content-Type
+        value: application/json
+      body: |-
+        {
+          "job_id": "JOB-20260324-001",
+          "status": "completed",
+          "started_at": "2026-03-24T04:35:00Z",
+          "completed_at": "2026-03-24T04:52:00Z",
+          "records_processed": 12847,
+          "output": {
+            "location": "s3://amfam-data-lake-prd/policy-extracts/2026-03-24/",
+            "file_count": 3,
+            "total_size_mb": 45.2
+          },
+          "_meta": {
+            "source": "mainframe-policy-db",
+            "bridge": "sftpmft1a.amfam.com",
+            "method": "sftp-pull-transform-load"
+          }
+        }
+- name: 7 — Governance Probes
+  description: 'Requests designed to test API governance posture: error handling, rate limiting, CORS, versioning. Use these
+    during the engagement to demonstrate what good looks like.'
+  item:
+  - name: Malformed Request (Error Shape Test)
+    request:
+      method: POST
+      header:
+      - key: Content-Type
+        value: application/json
+      - key: Accept
+        value: application/json
+      - key: X-Correlation-Id
+        value: '{{$guid}}'
+      body:
+        mode: raw
+        raw: |-
+          {
+            "this_field_does_not_exist": true,
+            "policy_id": 12345
+          }
+      url:
+        raw: '{{base_url}}/{{api_version}}/quotes'
+        host:
+        - '{{base_url}}'
+        path:
+        - '{{api_version}}'
+        - quotes
+      description: Intentionally malformed request to test error response standardization. RFC 9457 (Problem Details) compliance
+        is the gold standard.
+    response:
+    - name: Well-Structured Error (RFC 9457)
+      status: Unprocessable Entity
+      code: 422
+      header:
+      - key: Content-Type
+        value: application/problem+json
+      - key: X-Api-Version
+        value: 1.4.2
+      - key: X-Correlation-Id
+        value: c3d4e5f6-a7b8-9012-cdef-123456789012
+      body: |-
+        {
+          "type": "https://api.amfam.com/errors/validation-error",
+          "title": "Validation Error",
+          "status": 422,
+          "detail": "Request body failed schema validation",
+          "instance": "/v1/quotes",
+          "errors": [
+            {
+              "field": "type",
+              "message": "Required field 'type' is missing",
+              "code": "REQUIRED_FIELD"
+            },
+            {
+              "field": "applicant",
+              "message": "Required field 'applicant' is missing",
+              "code": "REQUIRED_FIELD"
+            },
+            {
+              "field": "this_field_does_not_exist",
+              "message": "Unknown field not permitted",
+              "code": "ADDITIONAL_PROPERTY"
+            },
+            {
+              "field": "policy_id",
+              "message": "Expected type 'string', got 'integer'",
+              "code": "TYPE_MISMATCH"
+            }
+          ]
+        }
+    - name: Generic Error (Common Anti-Pattern)
+      status: Internal Server Error
+      code: 500
+      header:
+      - key: Content-Type
+        value: application/json
+      body: |-
+        {
+          "message": "Internal Server Error"
+        }
+  - name: Expired Token (401 Shape Test)
+    request:
+      auth:
+        type: bearer
+        bearer:
+        - key: token
+          value: expired.jwt.token
+          type: string
+      method: GET
+      header:
+      - key: Accept
+        value: application/json
+      url:
+        raw: '{{base_url}}/{{api_version}}/policies'
+        host:
+        - '{{base_url}}'
+        path:
+        - '{{api_version}}'
+        - policies
+      description: Tests 401 response shape with an expired token. Good APIs return a `WWW-Authenticate` header with error
+        details per RFC 6750.
+    response:
+    - name: Proper 401 with WWW-Authenticate
+      status: Unauthorized
+      code: 401
+      header:
+      - key: Content-Type
+        value: application/problem+json
+      - key: WWW-Authenticate
+        value: Bearer realm="amfam-api", error="invalid_token", error_description="The access token has expired"
+      body: |-
+        {
+          "type": "https://api.amfam.com/errors/unauthorized",
+          "title": "Unauthorized",
+          "status": 401,
+          "detail": "The access token has expired. Request a new token from the Okta authorization server."
+        }
+  - name: Rate Limit Test (Rapid Fire)
+    event:
+    - listen: test
+      script:
+        type: text/javascript
+        exec:
+        - pm.test('Rate limit headers are present', function () {
+        - '    pm.expect(pm.response.headers.has(''X-RateLimit-Limit'')).to.be.true;'
+        - '    pm.expect(pm.response.headers.has(''X-RateLimit-Remaining'')).to.be.true;'
+        - '    pm.expect(pm.response.headers.has(''X-RateLimit-Reset'')).to.be.true;'
+        - '});'
+        - ''
+        - if (pm.response.code === 429) {
+        - '    pm.test(''429 includes Retry-After header'', function () {'
+        - '        pm.expect(pm.response.headers.has(''Retry-After'')).to.be.true;'
+        - '    });'
+        - '}'
+    request:
+      method: GET
+      header:
+      - key: Accept
+        value: application/json
+      - key: X-Correlation-Id
+        value: '{{$guid}}'
+      url:
+        raw: '{{base_url}}/{{api_version}}/policies?page=1&per_page=1'
+        host:
+        - '{{base_url}}'
+        path:
+        - '{{api_version}}'
+        - policies
+        query:
+        - key: page
+          value: '1'
+        - key: per_page
+          value: '1'
+      description: Run via Collection Runner with 50+ iterations to test rate limiting behavior. Checks for `X-RateLimit-*`
+        headers and proper `429 Too Many Requests` with `Retry-After`.
+    response:
+    - name: Rate Limited
+      status: Too Many Requests
+      code: 429
+      header:
+      - key: Content-Type
+        value: application/problem+json
+      - key: X-RateLimit-Limit
+        value: '1000'
+      - key: X-RateLimit-Remaining
+        value: '0'
+      - key: X-RateLimit-Reset
+        value: '1774330000'
+      - key: Retry-After
+        value: '30'
+      body: |-
+        {
+          "type": "https://api.amfam.com/errors/rate-limited",
+          "title": "Too Many Requests",
+          "status": 429,
+          "detail": "Rate limit exceeded. 1000 requests per 15 minutes allowed."
+        }
+  - name: CORS Preflight Check
+    request:
+      auth:
+        type: noauth
+      method: OPTIONS
+      header:
+      - key: Origin
+        value: https://www.amfam.com
+      - key: Access-Control-Request-Method
+        value: GET
+      - key: Access-Control-Request-Headers
+        value: Authorization, X-Correlation-Id, X-Operating-Company
+      url:
+        raw: '{{base_url}}/{{api_version}}/policies'
+        host:
+        - '{{base_url}}'
+        path:
+        - '{{api_version}}'
+        - policies
+      description: Tests CORS preflight response. Since AMFAM's frontend is on Vercel (different origin than API), proper
+        CORS configuration is critical.
+    response: []
